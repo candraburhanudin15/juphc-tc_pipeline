@@ -1,36 +1,74 @@
 apiVersion: tekton.dev/v1beta1
 kind: Pipeline
-metadata:  
-  name: juphc-tc-pipeline
+metadata:
+  name: tax-calculator-pipeline
 spec:
   workspaces:
-    - name: pipeline-workspace
-    - name: dockerconfig-ws
+    - name: pipeline-ws
   params:
-    - name: build-image
     - name: repo-url
-    - name: branch
+      type: string
+    - name: revision
+      type: string
       default: main
+    - name: image-name
+      type: string
+      description: Full image reference, e.g. us.icr.io/<namespace>/tax-calculator
+
   tasks:
-  
-    - name: init
-      workspaces:
-        - name: source
-          workspace: pipeline-workspace          
-      taskRef:
-        name: cleanup
-        
-    - name: clone
-      workspaces:
-        - name: output
-          workspace: pipeline-workspace          
+    - name: fetch-source
       taskRef:
         name: git-clone
         kind: ClusterTask
+      workspaces:
+        - name: output
+          workspace: pipeline-ws
       params:
-      - name: url
-        value: $(params.repo-url)
-      - name: revision
-        value: $(params.branch)
+        - name: url
+          value: $(params.repo-url)
+        - name: revision
+          value: $(params.revision)
+
+    # --- new: install dependencies before testing ---
+    - name: install-deps
+      taskRef:
+        name: npm-install
       runAfter:
-        - init
+        - fetch-source
+      workspaces:
+        - name: source
+          workspace: pipeline-ws
+
+    # --- new: run Jasmine unit tests; pipeline stops here if they fail ---
+    - name: run-tests
+      taskRef:
+        name: jasmine-test
+      runAfter:
+        - install-deps
+      workspaces:
+        - name: source
+          workspace: pipeline-ws
+
+    - name: build-image
+      taskRef:
+        name: buildah
+        kind: ClusterTask
+      runAfter:
+        - run-tests
+      workspaces:
+        - name: source
+          workspace: pipeline-ws
+      params:
+        - name: IMAGE
+          value: $(params.image-name)
+
+    - name: deploy
+      taskRef:
+        name: kubernetes-actions
+        kind: ClusterTask
+      runAfter:
+        - build-image
+      params:
+        - name: script
+          value: |
+            kubectl set image deployment/tax-calculator tax-calculator=$(params.image-name) --record
